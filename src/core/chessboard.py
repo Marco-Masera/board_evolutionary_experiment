@@ -184,7 +184,7 @@ class Chessboard:
                     # Capture opponent's piece
                     self.board[dest_row, dest_col] = 1
                     self.board[row, col] = 0
-                    self.red_energy += SETTINGS["energy_gain_stolen_piece"]
+                    self.red_energy += self.settings["energy_gain_stolen_piece"]
                     self.game_statistics.red_piece_captured()
                 else:
                     self.game_statistics.invalid_move_red_moved_to_red()

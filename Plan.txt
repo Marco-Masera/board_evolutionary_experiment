@@ -1,12 +1,5 @@
 Plan:
 
-- Nuova NN, più semplice, fatta da 0
-- Pre training: selezionare caselle verdi (poi rosse)
-- Osservare che riesca a raggiungere quasi 100% qui.
--Poi: altro pre training per assicurarsi che possa riconoscere vicinanza tra caselle 
-    Es verde scappa da rosso, rosso insegue verde
-    - Richiesta poca accuracy, oppure buttare via fully connected
-    - Chiedere a claude per pre treining, consigli specifici
 
 -Optimizator:
     * Score secondario per N verdi mangiati nel rosso 

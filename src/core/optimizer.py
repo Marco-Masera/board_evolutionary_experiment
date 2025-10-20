@@ -1,4 +1,4 @@
-from settings import SETTINGS, get_game_settings
+from settings import SETTINGS, get_game_settings, get_game_settings_for_red_first_training
 #from nn import GreenNN, RedNN
 from nn_new import PlayerNN
 import numpy as np
@@ -28,16 +28,17 @@ class Optimizer:
             ).init_random()
             for _ in range(POP_SIZE)
         ])
-        self.alpha = 0.01 #0.01/0.1
-        self.parents = 4
+        self.alpha = 0.02 #0.01/0.1
+        self.parents = 2
         self.generation = 0
         self.red_advantage = 0.5
         self.interrupted = False
+        self.gameSettings = get_game_settings_for_red_first_training(self.red_advantage) #TODO remove
 
     def _play_and_score(self, green, red, statistics):
         # Returns: Win scores, Secondary scores for Green. Red is -1*Green
         # Lower is better
-        settings = get_game_settings(self.red_advantage)
+        settings = self.gameSettings
         start_time = time.time()
         game = Game(green, red, settings, statistics)
         result = game.play()
@@ -109,6 +110,12 @@ class Optimizer:
         self._update_game_rules(green_wins)
         print(f"Green wins this generation: {green_wins} out of {len(self.greens)*NUM_COMP}")
         statistics.print_statistics()
+        if (statistics._red_pieces_captured > 1000):
+            self.gameSettings["energy_gain_stolen_piece"] = 40
+        if (statistics._red_pieces_captured > 2000):
+            self.gameSettings["energy_gain_stolen_piece"] = 30
+        if (statistics._red_pieces_captured > 3000):
+            self.gameSettings["energy_gain_stolen_piece"] = 20
         return np.array(green_scores), np.array(red_scores)
 
     def save_checkpoint(self):

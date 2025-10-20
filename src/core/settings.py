@@ -2,7 +2,6 @@ SETTINGS = {
     "w": 16,
     "h": 8,
     "energy_for_new_piece": 10,
-    "energy_gain_stolen_piece": 80,
 
     "red_start_energy_min": 15,
     "red_start_energy_max": 80,
@@ -34,4 +33,12 @@ def get_game_settings(red_advantage = 0.5):
         "red_start_energy": red_start_energy,
         "starting_pieces_red": starting_pieces_red,
         "starting_pieces_green": starting_pieces_green,
+    }
+
+def get_game_settings_for_red_first_training(red_advantage = 0.5):
+    return {
+        "red_start_energy": 80,
+        "starting_pieces_red": 20,
+        "starting_pieces_green": 60,
+        "energy_gain_stolen_piece": 50,
     }

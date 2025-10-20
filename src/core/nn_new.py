@@ -240,7 +240,7 @@ class PlayerNN(nn.Module):
     def pretrain_red(self, num_epochs=1000, learning_rate=0.001, batch_size=32, stop_at_loss=0.16):
         """
         Pre-train the network to:
-        - Select green pawns (-1) when action != action_n
+        - Select red pawns (1) when action != action_n
         - Select empty cells (0) when action == action_n
         """
         action_n = 8
@@ -314,6 +314,95 @@ class PlayerNN(nn.Module):
         print("Pre-training with action completed!")
         return self
 
+    def pretrain_red_capture(self, num_epochs=1000, learning_rate=0.001, batch_size=32, stop_at_loss=0.16, board_size=0):
+        """
+        Pre-train the network to select cells containing green pawns (-1).
+        """
+        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+        operation_offsets = [
+            (0, -1),   # 0: Move left
+            (0, 1),    # 1: Move right
+            (-1, 0),   # 2: Move up
+            (1, 0),    # 3: Move down
+            (-1, -1),  # 4: Left-Up
+            (-1, 1),   # 5: Right-Up
+            (1, -1),   # 6: Left-Down
+            (1, 1),    # 7: Right-Down
+        ]
+        for epoch in range(num_epochs):
+            total_loss = 0.0
+            num_batches = 0
+            
+            for _ in range(batch_size):
+                # Generate random board
+                board_state = get_random_board(self.width, self.height, board_size)
+
+                # Chose distance
+                distance = random.randint(1, 3)
+                # Find a random position in the board
+                x_random = np.random.randint(distance, self.height-distance-1)
+                y_random = np.random.randint(distance, self.width-distance-1)
+                # Set a red pawn at that position
+                board_state[x_random, y_random] = 1
+                # Chose direction
+                direction = random.randint(0, 7)
+                # Set a green pawn at that direction and distance
+                n_row, y_column = x_random, y_random
+                for i in range(1, distance):
+                    n_row += operation_offsets[direction][0]
+                    y_column += operation_offsets[direction][1]
+                    board_state[n_row, y_column] = 0
+                n_row += operation_offsets[direction][0]
+                y_column += operation_offsets[direction][1]
+                board_state[n_row, y_column] = -1
+
+                # Create input tensor
+                channel_0 = (board_state == -1).astype(np.float32)
+                channel_1 = (board_state == 1).astype(np.float32)
+                input_tensor = np.stack([channel_0, channel_1], axis=0)
+                input_tensor = torch.from_numpy(input_tensor).unsqueeze(0)
+                
+                # Forward pass
+                raw_output = self.forward(input_tensor, torch.zeros(1, 1), torch.zeros(1, 1))
+                selection_logits = raw_output[:, :self.selection_space]
+                action_logits = raw_output[:, self.selection_space:]
+                # Create target: one-hot encoding for piece selection and action:
+                # * Piece selection: select the red pawn position
+                # * Action: select the direction towards the green pawn
+                red_pawn_index = x_random * self.width + y_random
+                target_action = direction
+                
+                
+                # Loss for selection (choose the red pawn position)
+                selection_loss = F.cross_entropy(selection_logits, torch.tensor([red_pawn_index]))
+                
+                # Loss for action (should predict the direction towards green pawn)
+                action_loss = F.cross_entropy(action_logits, torch.tensor([target_action]))
+                
+                # Combined loss
+                loss = selection_loss + action_loss
+
+                # Cross-entropy loss
+                # loss = F.cross_entropy(selection_logits, torch.tensor(green_indices[0:1]))
+                
+                # Backpropagation
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item()
+                num_batches += 1
+            
+            if num_batches > 0 and (epoch + 1) % 100 == 0:
+                avg_loss = total_loss / num_batches
+                print(f"Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
+                if avg_loss <= stop_at_loss:
+                    print("Stopping early due to reaching target loss.")
+                    break
+        
+        print("Pre-training completed!")
+        return self
+
     def save_weights(self, filepath):
         torch.save(self.state_dict(), filepath)
     
@@ -340,9 +429,10 @@ WIDTH = 16
 HEIGHT = 8
 import random
 
-def get_random_board(width, height):
+def get_random_board(width, height, num_pieces=None):
     board = np.zeros((height, width), dtype=int)
-    num_pieces = int(random.random()*(width * height - 16))
+    if num_pieces is None:
+        num_pieces = int(random.random()*(80))
     positions = np.random.choice(width * height, num_pieces, replace=False)
     num_green = random.randint(0, num_pieces)
     for i in range(num_green):
@@ -372,9 +462,12 @@ if __name__ == "__main__":
         print("Trying generation: ", i)
         print("Testing PlayerNN pre-training for red...")
         n_nn = PlayerNN.get_red_nn(WIDTH, HEIGHT).init_random()
-        n_nn.pretrain_selection(-1, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
-        n_nn.pretrain_selection(0, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
-        n_nn.pretrain_red(num_epochs=1200, learning_rate=0.001, batch_size=64)
+        #n_nn.pretrain_selection(-1, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.2)
+        #n_nn.pretrain_selection(0, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.2)
+        n_nn.pretrain_red(num_epochs=1000, learning_rate=0.001, batch_size=64)
+        n_nn.pretrain_red_capture(num_epochs=1000, learning_rate=0.001, batch_size=64, stop_at_loss=0.1, board_size=2)
+        n_nn.pretrain_red_capture(num_epochs=1000, learning_rate=0.001, batch_size=64, stop_at_loss=0.1, board_size=4)
+        n_nn.pretrain_red_capture(num_epochs=1000, learning_rate=0.001, batch_size=64, stop_at_loss=0.1, board_size=8)
         n_nn.save_weights(f"{DIR_NAME}/red_{i}.pth")
         print("Testing PlayerNN pre-training for green...")
         n_nn = PlayerNN.get_green_nn(WIDTH, HEIGHT).init_random()
