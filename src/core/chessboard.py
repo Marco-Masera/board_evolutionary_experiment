@@ -14,27 +14,46 @@ class GameStatistics:
         self._green_pieces_moved = 0
         self._invalid_move_green_destination_not_empty = 0
         self._invalid_move_green_selected_empty = 0
+        self._eaten_last_match = 0
+        self._invalid_move_last_match = 0
+        self._invalid_move_red_moved_to_red = 0
+
+    def get_pieces_eaten_last_match(self):
+        return self._eaten_last_match
+
+    def invalid_move_red_moved_to_red(self):
+        self._invalid_move_red_moved_to_red += 1
+        self._invalid_move_last_match += 1
     
     def new_match(self):
         self._matches_played += 1
+        self._eaten_last_match = 0
+        self._invalid_move_last_match = 0
     
+    def get_invalid_move_last_match(self):
+        return self._invalid_move_last_match
+
     def piece_placed(self):
         self._pieces_placed += 1
     
     def piece_placement_failed_no_energy(self):
         self._piece_placement_failed_no_energy += 1
+        self._invalid_move_last_match += 1
     
     def invalid_move_red_selected_empty(self):
         self._invalid_move_red_selected_empty += 1
+        self._invalid_move_last_match += 1
     
     def red_piece_moved(self):
         self._red_pieces_moved += 1
     
     def red_piece_captured(self):
         self._red_pieces_captured += 1
+        self._eaten_last_match += 1
     
     def invalid_move_red_selected_opponent(self):
         self._invalid_move_red_selected_opponent += 1
+        self._invalid_move_last_match += 1
     
     def green_piece_moved(self):
         self._green_pieces_moved += 1
@@ -57,6 +76,7 @@ class GameStatistics:
         print(f"  Failed placements (no energy): {self._piece_placement_failed_no_energy}")
         print(f"  Invalid moves (selected empty): {self._invalid_move_red_selected_empty}")
         print(f"  Invalid moves (selected opponent): {self._invalid_move_red_selected_opponent}")
+        print(f"  Invalid moves (moved to red): {self._invalid_move_red_moved_to_red}")
         print(f"\nGreen Player:")
         print(f"  Pieces moved: {self._green_pieces_moved}")
         print(f"  Invalid moves (destination not empty): {self._invalid_move_green_destination_not_empty}")
@@ -99,10 +119,9 @@ class Chessboard:
         for pos in selected_positions:
             self.board[pos[0], pos[1]] = player
 
-    def step(self):
+    def apply_step(self, position_index, operation_index):
         if (self.turn == 1):
             # Red turn
-            position_index, operation_index = self.red_network.from_board_state(self.board, self.red_energy / 30, self.red_energy / (SETTINGS["energy_for_new_piece"]*10))
             # Find position from index
             row = position_index // self.width
             col = position_index % self.width
@@ -156,7 +175,6 @@ class Chessboard:
                 # Validate bounds - if out of bounds, don't move at all
                 if dest_row < 0 or dest_row >= self.height or dest_col < 0 or dest_col >= self.width:
                     dest_row, dest_col = row, col  # Stay in place
-                print(dest_row, dest_col, self.height, self.width)
                 # Execute move if destination is empty or capture if opponent
                 if self.board[dest_row, dest_col] == 0:
                     self.board[dest_row, dest_col] = 1
@@ -168,12 +186,13 @@ class Chessboard:
                     self.board[row, col] = 0
                     self.red_energy += SETTINGS["energy_gain_stolen_piece"]
                     self.game_statistics.red_piece_captured()
+                else:
+                    self.game_statistics.invalid_move_red_moved_to_red()
             else:
                 self.red_energy -= 1  # Penalty for invalid selection
                 self.game_statistics.invalid_move_red_selected_opponent()
         elif (self.turn == 2):
             # Green turn
-            position_index, operation_index = self.green_network.from_board_state(self.board)
             # Find position from index
             row = position_index // self.width
             col = position_index % self.width
@@ -209,6 +228,17 @@ class Chessboard:
         else:
             raise Exception("Invalid turn value")
 
+    def step(self):
+        if (self.turn == 1):
+            # Red turn
+            position_index, operation_index = self.red_network.from_board_state(self.board, self.red_energy / 30, self.red_energy / (SETTINGS["energy_for_new_piece"]*10))
+            self.apply_step(position_index, operation_index)
+        elif (self.turn == 2):
+            # Green turn
+            position_index, operation_index = self.green_network.from_board_state(self.board)
+            self.apply_step(position_index, operation_index)
+        else:
+            raise Exception("Invalid turn value")
         if (self.red_energy <= 0):
             return "green"
         if (np.sum(self.board == -1) == 0):
@@ -220,6 +250,24 @@ class Chessboard:
         red_pieces = np.sum(self.board == 1)
         green_pieces = np.sum(self.board == -1)
         print(f"Red pieces: {red_pieces}, Green pieces: {green_pieces}, Red energy: {self.red_energy}")
+
+    def print_board(self):
+        print("="*50)
+        print("\nCurrent Chessboard State:\n")
+        print(f">Red Energy: {self.red_energy}")
+        for row in range(self.height):
+            row_str = ""
+            for col in range(self.width):
+                cell = self.board[row, col]
+                if cell == 1:
+                    row_str += " R "  # Red piece
+                elif cell == -1:
+                    row_str += " G "  # Green piece
+                else:
+                    row_str += " . "  # Empty cell
+            print(row_str)
+        print("="*50)
+
 
 class Game:
     def __init__(self, nn_green, nn_red, settings, statistics = GameStatistics()):
@@ -234,9 +282,7 @@ class Game:
             num_turns += 1
             if (num_turns % 1500 == 0):
                 self.chessboard.print_stats()
-        #self.chessboard.print_stats()
         return winner
-        return None
 
     def print_stats(self):
         red_pieces = np.sum(self.board == 1)

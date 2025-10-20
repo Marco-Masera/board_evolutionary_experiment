@@ -8,8 +8,11 @@ import signal
 import os
 import sys
 import random
-POP_SIZE = 12
-CHECKPOINT_DIR = "/home/marco/Documenti/chessboard_game/v0"
+
+POP_SIZE = 20
+NUM_COMP = 10
+CHECKPOINT_DIR = None
+ELITISM = True
 
 class Optimizer:
     def __init__(self):
@@ -25,28 +28,31 @@ class Optimizer:
             ).init_random()
             for _ in range(POP_SIZE)
         ])
-        self.alpha = 0.05 #0.01/0.1
-        self.parents = 3
+        self.alpha = 0.01 #0.01/0.1
+        self.parents = 4
         self.generation = 0
         self.red_advantage = 0.5
         self.interrupted = False
 
     def _play_and_score(self, green, red, statistics):
         # Returns: Win scores, Secondary scores for Green. Red is -1*Green
+        # Lower is better
         settings = get_game_settings(self.red_advantage)
         start_time = time.time()
         game = Game(green, red, settings, statistics)
         result = game.play()
         delta_time = time.time() - start_time
+        eaten = statistics.get_pieces_eaten_last_match()
+        invalid_moves_red = statistics.get_invalid_move_last_match()
         if (result == "green"):
             primary = -1
-            secondary = delta_time # If I win, the longest I take the more penalized I am
+            secondary = eaten # If green wins, the secondary score is number of pieces it got eaten
         elif (result == "red"):
             primary = 1
-            secondary = -delta_time # If I lose, the longest I take the better
+            secondary = -delta_time # If green loses, secondary score is time: longer is better
         else:
             raise Exception("Unexpected return value from game.play()")
-        return primary, secondary
+        return primary, secondary, invalid_moves_red
 
     def _update_params(self):
         pass #TODO: alpha and parents
@@ -65,7 +71,7 @@ class Optimizer:
             [0, 0] for _ in range(len(self.greens))
         ]
         red_scores = [
-            [0, 0] for _ in range(len(self.reds))
+            [0, 0, 0] for _ in range(len(self.reds))
         ]
         population_comparisons = set([
             (i, red, 0)
@@ -85,22 +91,23 @@ class Optimizer:
                 red_score_primary, red_score_secondary = -1*green_score_primary, -1*green_score_secondary
                 green_scores[i][0] += green_score_primary
                 green_scores[i][1] += green_score_secondary
-                red_scores[i][0] += red_score_primary
-                red_scores[i][1] += red_score_secondary
+                red_scores[j][0] += red_score_primary
+                red_scores[j][1] += red_score_secondary
 
-                if (count + 1 < 10):
+                if (count + 1 < NUM_COMP):
                     population_comparisons.add((j, red, count + 1))"""
 
             for j, red in enumerate(self.reds):
-                green_score_primary, green_score_secondary = self._play_and_score(green, red, statistics)
+                green_score_primary, green_score_secondary, invalid_red = self._play_and_score(green, red, statistics)
                 green_wins -= green_score_primary
                 red_score_primary, red_score_secondary = -1*green_score_primary, -1*green_score_secondary
                 green_scores[i][0] += green_score_primary
                 green_scores[i][1] += green_score_secondary
                 red_scores[j][0] += red_score_primary
                 red_scores[j][1] += red_score_secondary
+                red_scores[j][2] += invalid_red
         self._update_game_rules(green_wins)
-        print(f"Green wins this generation: {green_wins} out of {len(self.greens)*len(self.reds)}")
+        print(f"Green wins this generation: {green_wins} out of {len(self.greens)*NUM_COMP}")
         statistics.print_statistics()
         return np.array(green_scores), np.array(red_scores)
 
@@ -149,9 +156,15 @@ class Optimizer:
             filepath = os.path.join(CHECKPOINT_DIR, f"green_{i}.pth")
             if not os.path.exists(filepath):
                 print(f"Warning: Missing green_{i}.pth, starting fresh")
-                new_greens.append(
-                    PlayerNN.get_green_nn(SETTINGS["w"], SETTINGS["h"]).init_random()
-                )
+                if (len(new_greens) == 0):
+                    new_greens.append(
+                        PlayerNN.get_green_nn(SETTINGS["w"], SETTINGS["h"]).init_random()
+                    )
+                else:
+                    sampled = random.choice(new_greens)
+                    new_greens.append(
+                        sampled.get_mutation(self.alpha)
+                    )
             else:
                 green = PlayerNN.get_green_nn(SETTINGS["w"], SETTINGS["h"])
                 green.load_weights(filepath)
@@ -164,9 +177,15 @@ class Optimizer:
             filepath = os.path.join(CHECKPOINT_DIR, f"red_{i}.pth")
             if not os.path.exists(filepath):
                 print(f"Warning: Missing red_{i}.pth, starting fresh")
-                new_reds.append(
-                    PlayerNN.get_red_nn(SETTINGS["w"], SETTINGS["h"]).init_random()
-                )
+                if (len(new_reds) == 0):
+                    new_reds.append(
+                        PlayerNN.get_red_nn(SETTINGS["w"], SETTINGS["h"]).init_random()
+                    )
+                else:
+                    sampled = random.choice(new_reds)
+                    new_reds.append(
+                        sampled.get_mutation(self.alpha)
+                    )
                 continue
             red = PlayerNN.get_red_nn(SETTINGS["w"], SETTINGS["h"])
             red.load_weights(filepath)
@@ -180,17 +199,20 @@ class Optimizer:
         self._update_params()
         green_scores, red_scores = self._get_scores()
         green_order = np.lexsort((green_scores[:,1], green_scores[:,0]))
-        red_order = np.lexsort((red_scores[:,1], red_scores[:,0]))
+        red_order = np.lexsort((red_scores[:,2], red_scores[:,1], red_scores[:,0]))
         best_greens = self.greens[green_order[:self.parents]]
         best_reds = self.reds[red_order[:self.parents]]
         children_per_parent = int(POP_SIZE // self.parents)
         additional = POP_SIZE - (children_per_parent * self.parents)
         new_greens = []
         for parent in best_greens:
-            for _ in range(children_per_parent):
-                new_greens.append(
-                    parent.get_mutation(self.alpha)
-                )
+            for i in range(children_per_parent):
+                if (ELITISM and i == 0):
+                    new_greens.append(parent)
+                else:
+                    new_greens.append(
+                        parent.get_mutation(self.alpha)
+                    )
         for _ in range(additional):
             new_greens.append(
                 best_greens[0].get_mutation(self.alpha)
@@ -200,10 +222,13 @@ class Optimizer:
         # Add new_reds creation
         new_reds = []
         for parent in best_reds:
-            for _ in range(children_per_parent):
-                new_reds.append(
-                    parent.get_mutation(self.alpha)
-                )
+            for i in range(children_per_parent):
+                if (ELITISM and i == 0):
+                    new_reds.append(parent)
+                else:
+                    new_reds.append(
+                        parent.get_mutation(self.alpha)
+                    )
         for _ in range(additional):
             new_reds.append(
                 best_reds[0].get_mutation(self.alpha)
@@ -218,8 +243,16 @@ def signal_handler(signum, frame):
     print("\n\nInterrupt received! Saving checkpoint...")
     optimizer.interrupted = True
 
-
+import sys 
 if __name__ == "__main__":
+    args = sys.argv[1:]
+    if (len(args) >= 1):
+        CHECKPOINT_DIR = os.path.join("..", "..", args[0])
+    else:
+        raise Exception("Checkpoint directory argument is required.")
+
+    print(f"Optimization checkpoint directory: {CHECKPOINT_DIR}")
+
     optimizer = Optimizer()
     
     # Set up signal handler
@@ -239,8 +272,9 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
     finally:
-        # Save checkpoint on exit (whether interrupted or completed)
-        if optimizer.interrupted or optimizer.generation > 0:
+        # Ask user whether to save checkpoint on exit
+        answer = input("Do you want to save the checkpoint before exiting? [y/N]: ").strip().lower()
+        if answer == "y":
             optimizer.save_checkpoint()
         print("Exiting...")
         sys.exit(0)

@@ -166,7 +166,7 @@ class PlayerNN(nn.Module):
         Args:
             target_value: Either 1 or -1, the cell value to train the network to select
         """
-        if target_value not in [1, -1]:
+        if target_value not in [1, 0, -1]:
             raise ValueError("target_value must be either 1 or -1")
         
         # Save original fully connected layer weights
@@ -254,8 +254,23 @@ class PlayerNN(nn.Module):
                 # Generate random board
                 board_state = get_random_board(self.width, self.height)
                 
-                # Randomly choose a target action
-                target_action = random.randint(0, self.action_space - 1)
+                # Create input tensor
+                channel_0 = (board_state == -1).astype(np.float32)
+                channel_1 = (board_state == 1).astype(np.float32)
+                input_tensor = np.stack([channel_0, channel_1], axis=0)
+                input_tensor = torch.from_numpy(input_tensor).unsqueeze(0)
+                
+                # Create energy tensor with random values in 0.1, 2
+                energy_tensor = torch.rand(1, 1) * 1.9 + 0.1
+                energy_tensor_2 = torch.rand(1, 1) * 1.0 + 0.1
+                
+                # Forward pass
+                raw_output = self.forward(input_tensor, energy_tensor, energy_tensor_2)
+                selection_logits = raw_output[:, :self.selection_space]
+                action_logits = raw_output[:, self.selection_space:]
+
+                # Choose a target action depending on action_logits produced by forward pass
+                target_action = torch.argmax(action_logits, dim=1).item()
                 
                 # Determine what to select based on target action
                 if target_action == action_n:
@@ -271,21 +286,6 @@ class PlayerNN(nn.Module):
                 
                 # Convert to position indices
                 target_indices = target_positions[0] * self.width + target_positions[1]
-                
-                # Create input tensor
-                channel_0 = (board_state == -1).astype(np.float32)
-                channel_1 = (board_state == 1).astype(np.float32)
-                input_tensor = np.stack([channel_0, channel_1], axis=0)
-                input_tensor = torch.from_numpy(input_tensor).unsqueeze(0)
-                
-                # Create energy tensor with random values in 0.1, 2
-                energy_tensor = torch.rand(1, 1) * 1.9 + 0.1
-                energy_tensor_2 = torch.rand(1, 1) * 1.0 + 0.1
-                
-                # Forward pass
-                raw_output = self.forward(input_tensor, energy_tensor, energy_tensor_2)
-                selection_logits = raw_output[:, :self.selection_space]
-                action_logits = raw_output[:, self.selection_space:]
                 
                 # Loss for selection (choose any valid target)
                 selection_loss = F.cross_entropy(selection_logits, torch.tensor([target_indices[0]]))
@@ -357,21 +357,29 @@ def get_random_board(width, height):
 
 
 DIR_NAME = "../../pretrained"
+import sys
 import os
 if __name__ == "__main__":
     if not os.path.exists(DIR_NAME):
         os.makedirs(DIR_NAME)
 
-    for i in range(10):
+    args = sys.argv[1:]
+    if len(args) < 1:
+        raise Exception("Please provide N as argument to specify how many networks to pre-train.")
+    N = int(args[0])
+
+    for i in range(N):
         print("Trying generation: ", i)
         print("Testing PlayerNN pre-training for red...")
         n_nn = PlayerNN.get_red_nn(WIDTH, HEIGHT).init_random()
-        n_nn.pretrain_selection(-1, num_epochs=600, learning_rate=0.001, batch_size=64, stop_at_loss=0.22)
-        n_nn.pretrain_red(num_epochs=600, learning_rate=0.001, batch_size=64)
+        n_nn.pretrain_selection(-1, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
+        n_nn.pretrain_selection(0, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
+        n_nn.pretrain_red(num_epochs=1200, learning_rate=0.001, batch_size=64)
         n_nn.save_weights(f"{DIR_NAME}/red_{i}.pth")
         print("Testing PlayerNN pre-training for green...")
         n_nn = PlayerNN.get_green_nn(WIDTH, HEIGHT).init_random()
-        n_nn.pretrain_selection(1, num_epochs=600, learning_rate=0.001, batch_size=64, stop_at_loss=0.22)
-        n_nn.pretrain_green(num_epochs=700, learning_rate=0.001, batch_size=64)
+        n_nn.pretrain_selection(1, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
+        n_nn.pretrain_selection(0, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
+        n_nn.pretrain_green(num_epochs=1000, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
         n_nn.save_weights(f"{DIR_NAME}/green_{i}.pth")
 

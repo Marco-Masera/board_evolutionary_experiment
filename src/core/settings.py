@@ -5,9 +5,9 @@ SETTINGS = {
     "energy_gain_stolen_piece": 80,
 
     "red_start_energy_min": 15,
-    "red_start_energy_max": 100,
-    "starting_pieces_min": 10,
-    "starting_pieces_max": 80,
+    "red_start_energy_max": 80,
+    "starting_pieces_min": 25,
+    "starting_pieces_max": 35,
 }
 
 
