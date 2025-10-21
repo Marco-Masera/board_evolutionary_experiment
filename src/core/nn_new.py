@@ -98,7 +98,7 @@ class PlayerNN(nn.Module):
         selection_indices, action_indices = self.interpret_output(raw_output)
         return selection_indices, action_indices
 
-    def pretrain_green(self, num_epochs=1000, learning_rate=0.001, batch_size=32, stop_at_loss=0.16):
+    def pretrain_selection(self, target_value, num_epochs=1000, learning_rate=0.001, batch_size=32, stop_at_loss=0.16):
         """
         Pre-train the network to select cells containing green pawns (-1).
         """
@@ -113,7 +113,7 @@ class PlayerNN(nn.Module):
                 board_state = get_random_board(self.width, self.height)
                 
                 # Find all green pawn positions
-                green_positions = np.where(board_state == -1)
+                green_positions = np.where(board_state == target_value)
                 
                 # Skip if no green pawns on board
                 if len(green_positions[0]) == 0:
@@ -158,249 +158,88 @@ class PlayerNN(nn.Module):
         print("Pre-training completed!")
         return self
 
-    def pretrain_selection(self, target_value, num_epochs=1000, learning_rate=0.001, batch_size=32, stop_at_loss=0.16):
+    def pretrain_with_feedback(self, is_red, num_episodes=1000, learning_rate=0.001, batch_size=32):
         """
-        Pre-train the network to select cells containing a specific value (1 or -1).
-        Only convolutional layers are updated; fully connected layers are restored after training.
-        
-        Args:
-            target_value: Either 1 or -1, the cell value to train the network to select
+        Pre-train using reward-weighted cross-entropy.
+        Collect decisions, get feedback, and update based on success/failure.
         """
-        if target_value not in [1, 0, -1]:
-            raise ValueError("target_value must be either 1 or -1")
-        
-        # Save original fully connected layer weights
-        fc1_weight = self.fc1.weight.data.clone()
-        fc1_bias = self.fc1.bias.data.clone() if self.fc1.bias is not None else None
-        fc2_weight = self.fc2.weight.data.clone()
-        fc2_bias = self.fc2.bias.data.clone() if self.fc2.bias is not None else None
-        
         optimizer = optim.Adam(self.parameters(), lr=learning_rate)
         
-        for epoch in range(num_epochs):
-            total_loss = 0.0
-            num_batches = 0
+        for episode in range(num_episodes):
+            batch_boards = []
+            batch_energies_move = []
+            batch_energies_create = []
+            batch_selections = []
+            batch_actions = []
+            batch_rewards = []
             
+            # Collect batch of experiences
             for _ in range(batch_size):
-                # Generate random board
+                # Generate random scenario
                 board_state = get_random_board(self.width, self.height)
+                energy_move = torch.rand(1, 1) * 1.5
+                energy_create = torch.rand(1, 1) * 1.0
                 
-                # Find all positions with target value
-                target_positions = np.where(board_state == target_value)
-                
-                # Skip if no target positions on board
-                if len(target_positions[0]) == 0:
-                    continue
-                
-                # Convert to position indices
-                target_indices = target_positions[0] * self.width + target_positions[1]
-                
-                # Create input tensor
+                # Get network decision
                 channel_0 = (board_state == -1).astype(np.float32)
                 channel_1 = (board_state == 1).astype(np.float32)
                 input_tensor = np.stack([channel_0, channel_1], axis=0)
                 input_tensor = torch.from_numpy(input_tensor).unsqueeze(0)
                 
-                # Forward pass
-                energy_per_move = torch.rand(1, 1) * 1.5
-                energy_per_creation = torch.rand(1, 1) * 1.0
-                raw_output = self.forward(input_tensor, energy_per_move, energy_per_creation)
-                selection_logits = raw_output[:, :self.selection_space]
+                raw_output = self.forward(input_tensor, energy_move, energy_create)
+                selection_idx, action_idx = self.interpret_output(raw_output)
                 
-                # Cross-entropy loss
-                loss = F.cross_entropy(selection_logits, torch.tensor(target_indices[0:1]))
+                # EVALUATE: Your custom logic here
+                reward = evaluate_decision(is_red, board_state, selection_idx, action_idx)
                 
-                # Backpropagation
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                
-                total_loss += loss.item()
-                num_batches += 1
+                # Store experience
+                batch_boards.append(input_tensor)
+                batch_energies_move.append(energy_move)
+                batch_energies_create.append(energy_create)
+                batch_selections.append(selection_idx)
+                batch_actions.append(action_idx)
+                batch_rewards.append(reward)
             
-            if num_batches > 0 and (epoch + 1) % 100 == 0:
-                avg_loss = total_loss / num_batches
-                print(f"Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
-                if avg_loss <= stop_at_loss:
-                    print("Stopping early due to reaching target loss.")
-                    break
-        
-        # Restore original fully connected layer weights
-        with torch.no_grad():
-            self.fc1.weight.data.copy_(fc1_weight)
-            if fc1_bias is not None:
-                self.fc1.bias.data.copy_(fc1_bias)
-            self.fc2.weight.data.copy_(fc2_weight)
-            if fc2_bias is not None:
-                self.fc2.bias.data.copy_(fc2_bias)
-        
-        print(f"Pre-training for target value {target_value} completed! FC layers restored.")
-        return self
-
-    def pretrain_red(self, num_epochs=1000, learning_rate=0.001, batch_size=32, stop_at_loss=0.16):
-        """
-        Pre-train the network to:
-        - Select red pawns (1) when action != action_n
-        - Select empty cells (0) when action == action_n
-        """
-        action_n = 8
-        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
-        
-        for epoch in range(num_epochs):
-            total_loss = 0.0
-            num_batches = 0
-            
-            for _ in range(batch_size):
-                # Generate random board
-                board_state = get_random_board(self.width, self.height)
+            # Update network based on rewards
+            if len(batch_boards) > 0:
+                # Stack tensors
+                boards_tensor = torch.cat(batch_boards, dim=0)
+                energies_move_tensor = torch.cat(batch_energies_move, dim=0)
+                energies_create_tensor = torch.cat(batch_energies_create, dim=0)
+                selections_tensor = torch.tensor(batch_selections, dtype=torch.long)
+                actions_tensor = torch.tensor(batch_actions, dtype=torch.long)
+                rewards_tensor = torch.tensor(batch_rewards, dtype=torch.float32)
                 
-                # Create input tensor
-                channel_0 = (board_state == -1).astype(np.float32)
-                channel_1 = (board_state == 1).astype(np.float32)
-                input_tensor = np.stack([channel_0, channel_1], axis=0)
-                input_tensor = torch.from_numpy(input_tensor).unsqueeze(0)
-                
-                # Create energy tensor with random values in 0.1, 2
-                energy_tensor = torch.rand(1, 1) * 1.9 + 0.1
-                energy_tensor_2 = torch.rand(1, 1) * 1.0 + 0.1
+                # Normalize rewards (optional but helpful)
+                rewards_tensor = (rewards_tensor - rewards_tensor.mean()) / (rewards_tensor.std() + 1e-8)
                 
                 # Forward pass
-                raw_output = self.forward(input_tensor, energy_tensor, energy_tensor_2)
+                raw_output = self.forward(boards_tensor, energies_move_tensor, energies_create_tensor)
                 selection_logits = raw_output[:, :self.selection_space]
                 action_logits = raw_output[:, self.selection_space:]
-
-                # Choose a target action depending on action_logits produced by forward pass
-                target_action = torch.argmax(action_logits, dim=1).item()
                 
-                # Determine what to select based on target action
-                if target_action == action_n:
-                    # Select empty cells
-                    target_positions = np.where(board_state == 0)
-                else:
-                    # Select green pawns
-                    target_positions = np.where(board_state == 1)
+                # Compute log probabilities
+                selection_log_probs = F.log_softmax(selection_logits, dim=1)
+                action_log_probs = F.log_softmax(action_logits, dim=1)
                 
-                # Skip if no valid positions
-                if len(target_positions[0]) == 0:
-                    continue
+                # Get log probs of chosen actions
+                chosen_selection_log_probs = selection_log_probs.gather(1, selections_tensor.unsqueeze(1)).squeeze()
+                chosen_action_log_probs = action_log_probs.gather(1, actions_tensor.unsqueeze(1)).squeeze()
                 
-                # Convert to position indices
-                target_indices = target_positions[0] * self.width + target_positions[1]
-                
-                # Loss for selection (choose any valid target)
-                selection_loss = F.cross_entropy(selection_logits, torch.tensor([target_indices[0]]))
-                
-                # Loss for action (should predict target_action)
-                action_loss = F.cross_entropy(action_logits, torch.tensor([target_action]))
-                
-                # Combined loss
-                loss = selection_loss + action_loss
+                # Policy gradient loss (negative because we want to maximize reward)
+                loss = -(chosen_selection_log_probs + chosen_action_log_probs) * rewards_tensor
+                loss = loss.mean()
                 
                 # Backpropagation
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 
-                total_loss += loss.item()
-                num_batches += 1
-            
-            if num_batches > 0 and (epoch + 1) % 100 == 0:
-                avg_loss = total_loss / num_batches
-                print(f"Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
-                if avg_loss <= stop_at_loss:
-                    print("Stopping early due to reaching target loss.")
-                    break
+                if (episode + 1) % 100 == 0:
+                    avg_reward = sum(batch_rewards) / len(batch_rewards)
+                    print(f"Episode {episode + 1}/{num_episodes}, Avg Reward: {avg_reward:.4f}, Loss: {loss.item():.4f}")
         
-        print("Pre-training with action completed!")
-        return self
-
-    def pretrain_red_capture(self, num_epochs=1000, learning_rate=0.001, batch_size=32, stop_at_loss=0.16, board_size=0):
-        """
-        Pre-train the network to select cells containing green pawns (-1).
-        """
-        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
-        operation_offsets = [
-            (0, -1),   # 0: Move left
-            (0, 1),    # 1: Move right
-            (-1, 0),   # 2: Move up
-            (1, 0),    # 3: Move down
-            (-1, -1),  # 4: Left-Up
-            (-1, 1),   # 5: Right-Up
-            (1, -1),   # 6: Left-Down
-            (1, 1),    # 7: Right-Down
-        ]
-        for epoch in range(num_epochs):
-            total_loss = 0.0
-            num_batches = 0
-            
-            for _ in range(batch_size):
-                # Generate random board
-                board_state = get_random_board(self.width, self.height, board_size)
-
-                # Chose distance
-                distance = random.randint(1, 3)
-                # Find a random position in the board
-                x_random = np.random.randint(distance, self.height-distance-1)
-                y_random = np.random.randint(distance, self.width-distance-1)
-                # Set a red pawn at that position
-                board_state[x_random, y_random] = 1
-                # Chose direction
-                direction = random.randint(0, 7)
-                # Set a green pawn at that direction and distance
-                n_row, y_column = x_random, y_random
-                for i in range(1, distance):
-                    n_row += operation_offsets[direction][0]
-                    y_column += operation_offsets[direction][1]
-                    board_state[n_row, y_column] = 0
-                n_row += operation_offsets[direction][0]
-                y_column += operation_offsets[direction][1]
-                board_state[n_row, y_column] = -1
-
-                # Create input tensor
-                channel_0 = (board_state == -1).astype(np.float32)
-                channel_1 = (board_state == 1).astype(np.float32)
-                input_tensor = np.stack([channel_0, channel_1], axis=0)
-                input_tensor = torch.from_numpy(input_tensor).unsqueeze(0)
-                
-                # Forward pass
-                raw_output = self.forward(input_tensor, torch.zeros(1, 1), torch.zeros(1, 1))
-                selection_logits = raw_output[:, :self.selection_space]
-                action_logits = raw_output[:, self.selection_space:]
-                # Create target: one-hot encoding for piece selection and action:
-                # * Piece selection: select the red pawn position
-                # * Action: select the direction towards the green pawn
-                red_pawn_index = x_random * self.width + y_random
-                target_action = direction
-                
-                
-                # Loss for selection (choose the red pawn position)
-                selection_loss = F.cross_entropy(selection_logits, torch.tensor([red_pawn_index]))
-                
-                # Loss for action (should predict the direction towards green pawn)
-                action_loss = F.cross_entropy(action_logits, torch.tensor([target_action]))
-                
-                # Combined loss
-                loss = selection_loss + action_loss
-
-                # Cross-entropy loss
-                # loss = F.cross_entropy(selection_logits, torch.tensor(green_indices[0:1]))
-                
-                # Backpropagation
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                
-                total_loss += loss.item()
-                num_batches += 1
-            
-            if num_batches > 0 and (epoch + 1) % 100 == 0:
-                avg_loss = total_loss / num_batches
-                print(f"Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
-                if avg_loss <= stop_at_loss:
-                    print("Stopping early due to reaching target loss.")
-                    break
-        
-        print("Pre-training completed!")
+        print("Feedback-based pre-training completed!")
         return self
 
     def save_weights(self, filepath):
@@ -421,20 +260,67 @@ class PlayerNN(nn.Module):
                 # Adaptive noise based on parameter magnitude
                 noise = torch.randn_like(param) * noise_scale * param.abs().mean()
                 param.add_(noise)
-        
         return mutated_net
 
 
 WIDTH = 16
 HEIGHT = 8
 import random
+from settings import get_game_settings_for_red_first_training
+from chessboard import Chessboard, GameStatistics
+def board_avg_distance(board):
+    """
+    Computes the average Euclidean distance between all pawns of team -1 and all pawns of team 1.
+    Returns 0 if there are no pawns of one or both teams.
+    """
+    # Find positions of -1 and 1 pawns
+    pos_neg1 = np.argwhere(board == -1)
+    pos_1 = np.argwhere(board == 1)
+    
+    if len(pos_neg1) == 0 or len(pos_1) == 0:
+        return 0.0  # No pawns of one or both teams
+    
+    # Compute all pairwise distances
+    dists = np.linalg.norm(pos_neg1[:, None, :] - pos_1[None, :, :], axis=2)
+    avg_dist = dists.mean()
+    return avg_dist
+
+def evaluate_decision(is_red, board_state, selection_idx, action_idx):
+    statistics = GameStatistics()
+    chessboard = Chessboard(
+        None, None, get_game_settings_for_red_first_training(0.5), statistics
+    )
+    chessboard.set_board_force(board_state)
+    if is_red:
+        chessboard.turn = 1
+    else:
+        chessboard.turn = 2
+
+    chessboard.apply_step(selection_idx, action_idx)
+
+    if is_red and statistics._red_pieces_captured > 0:
+        return 1
+
+    new_board_state = chessboard.board
+    old_distance = board_avg_distance(board_state)
+    new_distance = board_avg_distance(new_board_state)
+    if is_red:
+        return 1 if new_distance < old_distance else -1
+    else:
+        if new_distance > old_distance:
+            return 1
+        elif new_distance < old_distance:
+            return -1
+        else:
+            return 0
+
 
 def get_random_board(width, height, num_pieces=None):
     board = np.zeros((height, width), dtype=int)
     if num_pieces is None:
-        num_pieces = int(random.random()*(80))
+        num_pieces = max(2, int(random.random()*(80)))
     positions = np.random.choice(width * height, num_pieces, replace=False)
-    num_green = random.randint(0, num_pieces)
+    num_green = random.randint(1, num_pieces-1)
     for i in range(num_green):
         row = positions[i] // width
         col = positions[i] % width
@@ -459,20 +345,24 @@ if __name__ == "__main__":
     N = int(args[0])
 
     for i in range(N):
-        print("Trying generation: ", i)
-        print("Testing PlayerNN pre-training for red...")
+        print("Pre training generation: ", i)
+        
+        print(">Red individual:")
         n_nn = PlayerNN.get_red_nn(WIDTH, HEIGHT).init_random()
-        #n_nn.pretrain_selection(-1, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.2)
-        #n_nn.pretrain_selection(0, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.2)
-        n_nn.pretrain_red(num_epochs=1000, learning_rate=0.001, batch_size=64)
-        n_nn.pretrain_red_capture(num_epochs=1000, learning_rate=0.001, batch_size=64, stop_at_loss=0.1, board_size=2)
-        n_nn.pretrain_red_capture(num_epochs=1000, learning_rate=0.001, batch_size=64, stop_at_loss=0.1, board_size=4)
-        n_nn.pretrain_red_capture(num_epochs=1000, learning_rate=0.001, batch_size=64, stop_at_loss=0.1, board_size=8)
+        print("  Pre training for selection of items")
+        n_nn.pretrain_selection(-1, num_epochs=700, learning_rate=0.001, batch_size=64, stop_at_loss=0.3)
+        n_nn.pretrain_selection(0, num_epochs=700, learning_rate=0.001, batch_size=64, stop_at_loss=0.3)
+        n_nn.pretrain_selection(1, num_epochs=1000, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
+        print("  Pre training with reinforcment learning")
+        n_nn.pretrain_with_feedback(True, num_episodes=1000, learning_rate=0.001, batch_size=32)
+
         n_nn.save_weights(f"{DIR_NAME}/red_{i}.pth")
-        print("Testing PlayerNN pre-training for green...")
-        n_nn = PlayerNN.get_green_nn(WIDTH, HEIGHT).init_random()
-        n_nn.pretrain_selection(1, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
-        n_nn.pretrain_selection(0, num_epochs=900, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
-        n_nn.pretrain_green(num_epochs=1000, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
+        
+        print(">Green individual:")
+        n_nn.pretrain_selection(1, num_epochs=700, learning_rate=0.001, batch_size=64, stop_at_loss=0.3)
+        n_nn.pretrain_selection(0, num_epochs=700, learning_rate=0.001, batch_size=64, stop_at_loss=0.3)
+        n_nn.pretrain_selection(-1, num_epochs=1000, learning_rate=0.001, batch_size=64, stop_at_loss=0.1)
+        print("  Pre training with reinforcment learning")
+        n_nn.pretrain_with_feedback(False, num_episodes=1000, learning_rate=0.001, batch_size=32)
         n_nn.save_weights(f"{DIR_NAME}/green_{i}.pth")
 

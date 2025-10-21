@@ -95,6 +95,9 @@ class Chessboard:
         self.board = np.zeros((self.height, self.width), dtype=int)
         self.red_energy = self.settings["red_start_energy"]
         self.turn = 1
+
+    def set_board_force(self, board):
+        self.board = board
     
     def setup_board(self):
         # Initialize pieces for both players
